@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Standalone calibration helper for BinScanner.
+
+Run this against a saved camera snapshot to find good `roi_*` and
+`red_pixel_threshold_percent` values before configuring the add-on - no
+Home Assistant or Docker required, just Pillow.
+
+Example:
+    python3 tools/calibrate.py doorbell_snapshot.jpg \\
+        --roi-x 0.30 --roi-y 0.55 --roi-width 0.25 --roi-height 0.25 \\
+        --save-roi /tmp/roi_preview.png
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+# Reuse the same detection logic the add-on runs, without needing Flask/requests.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin_scanner" / "app"))
+
+from detector import HsvThresholds, Roi, crop_roi, red_pixel_percent  # noqa: E402
+from PIL import Image  # noqa: E402
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("image", help="Path to a saved camera snapshot (JPEG/PNG)")
+    parser.add_argument("--roi-x", type=float, default=0.30)
+    parser.add_argument("--roi-y", type=float, default=0.55)
+    parser.add_argument("--roi-width", type=float, default=0.25)
+    parser.add_argument("--roi-height", type=float, default=0.25)
+    parser.add_argument("--hue-min", type=int, default=0)
+    parser.add_argument("--hue-max", type=int, default=12)
+    parser.add_argument("--hue-min2", type=int, default=245)
+    parser.add_argument("--hue-max2", type=int, default=255)
+    parser.add_argument("--min-saturation", type=int, default=90)
+    parser.add_argument("--min-value", type=int, default=60)
+    parser.add_argument("--threshold-percent", type=float, default=10.0)
+    parser.add_argument(
+        "--save-roi", metavar="PATH", help="Save a crop of just the ROI, to visually confirm placement"
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    roi = Roi(x=args.roi_x, y=args.roi_y, width=args.roi_width, height=args.roi_height)
+    thresholds = HsvThresholds(
+        hue_min=args.hue_min,
+        hue_max=args.hue_max,
+        hue_min2=args.hue_min2,
+        hue_max2=args.hue_max2,
+        min_saturation=args.min_saturation,
+        min_value=args.min_value,
+    )
+
+    image = Image.open(args.image)
+    image.load()
+
+    pct = red_pixel_percent(image, roi, thresholds)
+    detected = pct >= args.threshold_percent
+
+    print(f"Image size:        {image.size[0]}x{image.size[1]}")
+    print(f"ROI:                x={roi.x} y={roi.y} width={roi.width} height={roi.height}")
+    print(f"Red pixels in ROI:  {pct:.2f}%")
+    print(f"Threshold:          {args.threshold_percent}%")
+    print(f"Bin detected:       {detected}")
+
+    if args.save_roi:
+        crop_roi(image.convert("RGB"), roi).save(args.save_roi)
+        print(f"Saved ROI preview:  {args.save_roi}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

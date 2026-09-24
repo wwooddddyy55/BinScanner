@@ -1,0 +1,53 @@
+name: Bin Scanner
+version: "0.1.0"
+slug: bin_scanner
+description: Checks a Home Assistant camera snapshot for a red-lidded bin left out front, and sends a notification if it's still there.
+url: https://github.com/wwooddddyy55/binscanner
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+init: false
+startup: application
+boot: auto
+homeassistant_api: true
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: HTTP API used to trigger a scan (call from an HA automation/rest_command)
+options:
+  camera_entity: camera.front_doorbell
+  notify_service: mobile_app_your_phone
+  roi_x: 0.30
+  roi_y: 0.55
+  roi_width: 0.25
+  roi_height: 0.25
+  red_hue_min: 0
+  red_hue_max: 12
+  red_hue_min2: 245
+  red_hue_max2: 255
+  min_saturation: 90
+  min_value: 60
+  red_pixel_threshold_percent: 10.0
+  notify_title: "Bin check"
+  notify_message: "The bin is still out front — don't forget to bring it in."
+  log_level: info
+schema:
+  camera_entity: str
+  notify_service: str
+  roi_x: float(0,1)
+  roi_y: float(0,1)
+  roi_width: float(0,1)
+  roi_height: float(0,1)
+  red_hue_min: int(0,255)
+  red_hue_max: int(0,255)
+  red_hue_min2: int(0,255)
+  red_hue_max2: int(0,255)
+  min_saturation: int(0,255)
+  min_value: int(0,255)
+  red_pixel_threshold_percent: float(0,100)
+  notify_title: str
+  notify_message: str
+  log_level: list(debug|info|warning|error)
