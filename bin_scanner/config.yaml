@@ -1,5 +1,5 @@
 name: Bin Scanner
-version: "0.1.0"
+version: "0.2.0"
 slug: bin_scanner
 description: Checks a Home Assistant camera snapshot for a red-lidded bin left out front, and sends a notification if it's still there.
 url: https://github.com/wwooddddyy55/binscanner
