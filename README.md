@@ -41,10 +41,38 @@ long-lived access token to create or manage.
 
 ## 2. Calibrate the detection region
 
-Rather than guessing `roi_*`/threshold values by redeploying the add-on
-repeatedly, save a real snapshot from the camera (e.g. from the camera
-entity's "download" button in HA, or a still from the Reolink app) and run
-the standalone calibration tool locally:
+### Option A: draw it in the browser (recommended)
+
+With the add-on running, open:
+
+```
+http://<addon-hostname>:8099/calibrate
+```
+
+(use whatever host port you've mapped `8099/tcp` to, if you changed it in
+the add-on's Network settings). This page:
+
+- Shows the current camera snapshot — click **Refresh snapshot** to grab a
+  new one.
+- Lets you click-and-drag directly on the image to draw the region of
+  interest.
+- Runs the add-on's actual detection code against that exact snapshot and
+  shows the live red % and detected/not-detected result as you adjust the
+  box or the threshold sliders — no guessing or redeploying.
+- Prints the resulting `roi_x` / `roi_y` / `roi_width` / `roi_height` /
+  `red_pixel_threshold_percent` values for you to copy into the add-on's
+  **Configuration** tab (this page doesn't save anything itself — Home
+  Assistant owns the stored options).
+
+Drag the box until it tightly covers the bin's lid, adjust the threshold %
+until "Bin detected" matches reality with the bin present vs. absent, copy
+the values into Configuration, and restart the add-on.
+
+### Option B: offline CLI tool
+
+If you'd rather not expose the add-on to test with, or want to iterate on a
+saved image locally, `tools/calibrate.py` does the same math without needing
+Docker or Home Assistant reachable:
 
 ```bash
 python3 -m pip install pillow
@@ -55,10 +83,6 @@ python3 tools/calibrate.py doorbell_snapshot.jpg \
 
 This prints the red-pixel percentage for that region and saves a cropped
 `roi_preview.png` so you can confirm the box actually covers the bin's lid.
-Adjust `--roi-*` until the crop lines up, and note the red percentage with
-the bin present vs. absent to pick a sensible
-`red_pixel_threshold_percent` (it defaults to `10`, i.e. detect once >10% of
-the region is red).
 
 `roi_x`/`roi_y` are the top-left corner as a fraction (0–1) of the image
 width/height; `roi_width`/`roi_height` are the box size the same way — this
@@ -112,5 +136,5 @@ curl -X POST "http://<addon-hostname>:8099/scan?dry_run=true"
 
 - `repository.yaml` — makes this repo installable as an HA add-on repository
 - `bin_scanner/` — the add-on itself (Dockerfile, `config.yaml`, Flask app)
-- `bin_scanner/tests/` — unit tests for the detection logic (`pytest bin_scanner/tests`)
+- `bin_scanner/tests/` — unit + Flask endpoint tests (`pytest bin_scanner/tests`)
 - `tools/calibrate.py` — standalone ROI/threshold calibration helper

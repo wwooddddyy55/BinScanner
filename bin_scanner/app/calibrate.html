@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bin Scanner - Calibrate</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; background: #111; color: #eee; }
+  h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+  p.hint { color: #aaa; margin-top: 0; max-width: 60rem; }
+  #canvas-wrap { display: inline-block; border: 1px solid #333; margin: 1rem 0; line-height: 0; }
+  canvas { display: block; max-width: 100%; height: auto; cursor: crosshair; }
+  .row { display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: flex-start; }
+  fieldset { border: 1px solid #333; border-radius: 6px; padding: 0.75rem 1rem; }
+  legend { padding: 0 0.4rem; color: #ccc; }
+  label { display: block; font-size: 0.85rem; margin-top: 0.5rem; color: #ccc; }
+  input[type=number] { width: 5.5rem; }
+  button { background: #2d6cdf; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; margin-right: 0.5rem; font-size: 0.9rem; }
+  button.secondary { background: #333; }
+  #result { font-size: 1.1rem; margin-top: 0.25rem; }
+  #result.detected { color: #ff6b6b; }
+  #result.clear { color: #6bffa0; }
+  pre { background: #1b1b1b; border: 1px solid #333; padding: 0.75rem 1rem; border-radius: 6px; width: fit-content; }
+  #status { color: #f0ad4e; margin-left: 0.75rem; }
+</style>
+</head>
+<body>
+  <h1>Bin Scanner &mdash; calibrate detection area</h1>
+  <p class="hint">
+    Click "Refresh snapshot", then click-and-drag on the image to draw a box around where the bin sits.
+    The result below is computed by the add-on's real detection code against this exact snapshot, so what
+    you see here is what a real scan would decide. Adjust the sliders until it matches reality, then copy
+    the values at the bottom into the add-on's <strong>Configuration</strong> tab in Home Assistant and
+    restart the add-on &mdash; this page does not save anything itself.
+  </p>
+
+  <button id="refresh">Refresh snapshot</button>
+  <span id="status"></span>
+
+  <div id="canvas-wrap">
+    <canvas id="canvas" width="800" height="600"></canvas>
+  </div>
+
+  <div class="row">
+    <fieldset>
+      <legend>Color thresholds (HSV, 0-255)</legend>
+      <label>Hue min <input id="hue_min" type="number" min="0" max="255"></label>
+      <label>Hue max <input id="hue_max" type="number" min="0" max="255"></label>
+      <label>Hue min 2 <input id="hue_min2" type="number" min="0" max="255"></label>
+      <label>Hue max 2 <input id="hue_max2" type="number" min="0" max="255"></label>
+      <label>Min saturation <input id="min_saturation" type="number" min="0" max="255"></label>
+      <label>Min value <input id="min_value" type="number" min="0" max="255"></label>
+      <label>Threshold % <input id="threshold_percent" type="number" min="0" max="100" step="0.5"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Result</legend>
+      <div id="result">Draw a box on the image to test</div>
+    </fieldset>
+  </div>
+
+  <h3>Copy these into the add-on's Configuration tab</h3>
+  <pre id="config-snippet">roi_x: -
+roi_y: -
+roi_width: -
+roi_height: -
+red_pixel_threshold_percent: -</pre>
+  <button id="copy" class="secondary">Copy to clipboard</button>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const resultEl = document.getElementById('result');
+const snippetEl = document.getElementById('config-snippet');
+
+let img = new Image();
+let imgLoaded = false;
+let roi = null; // {x, y, width, height} normalized 0-1
+let dragging = false;
+let dragStart = null;
+
+const fields = ['hue_min', 'hue_max', 'hue_min2', 'hue_max2', 'min_saturation', 'min_value', 'threshold_percent'];
+const fieldEl = (name) => document.getElementById(name);
+
+async function loadOptions() {
+  const res = await fetch('/calibrate/options');
+  const opts = await res.json();
+  fieldEl('hue_min').value = opts.red_hue_min;
+  fieldEl('hue_max').value = opts.red_hue_max;
+  fieldEl('hue_min2').value = opts.red_hue_min2;
+  fieldEl('hue_max2').value = opts.red_hue_max2;
+  fieldEl('min_saturation').value = opts.min_saturation;
+  fieldEl('min_value').value = opts.min_value;
+  fieldEl('threshold_percent').value = opts.red_pixel_threshold_percent;
+  roi = { x: opts.roi_x, y: opts.roi_y, width: opts.roi_width, height: opts.roi_height };
+}
+
+function draw() {
+  if (!imgLoaded) return;
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  ctx.drawImage(img, 0, 0);
+  if (roi) {
+    ctx.strokeStyle = '#2d6cdf';
+    ctx.lineWidth = Math.max(2, canvas.width / 300);
+    ctx.strokeRect(roi.x * canvas.width, roi.y * canvas.height, roi.width * canvas.width, roi.height * canvas.height);
+  }
+}
+
+function refreshSnapshot() {
+  statusEl.textContent = 'Loading snapshot...';
+  const next = new Image();
+  next.onload = () => {
+    img = next;
+    imgLoaded = true;
+    draw();
+    statusEl.textContent = '';
+    if (roi) preview();
+  };
+  next.onerror = () => { statusEl.textContent = 'Failed to load snapshot - check the add-on log.'; };
+  next.src = '/calibrate/snapshot?t=' + Date.now();
+}
+
+function canvasPoint(evt) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  return {
+    x: (evt.clientX - rect.left) * scaleX,
+    y: (evt.clientY - rect.top) * scaleY,
+  };
+}
+
+canvas.addEventListener('mousedown', (evt) => {
+  if (!imgLoaded) return;
+  dragging = true;
+  dragStart = canvasPoint(evt);
+});
+
+canvas.addEventListener('mousemove', (evt) => {
+  if (!dragging) return;
+  const p = canvasPoint(evt);
+  const x0 = Math.max(0, Math.min(dragStart.x, p.x));
+  const x1 = Math.min(canvas.width, Math.max(dragStart.x, p.x));
+  const y0 = Math.max(0, Math.min(dragStart.y, p.y));
+  const y1 = Math.min(canvas.height, Math.max(dragStart.y, p.y));
+  roi = {
+    x: x0 / canvas.width, y: y0 / canvas.height,
+    width: (x1 - x0) / canvas.width, height: (y1 - y0) / canvas.height,
+  };
+  draw();
+});
+
+window.addEventListener('mouseup', () => {
+  if (!dragging) return;
+  dragging = false;
+  if (roi && roi.width > 0.01 && roi.height > 0.01) preview();
+});
+
+async function preview() {
+  if (!roi) return;
+  const body = {
+    roi_x: roi.x, roi_y: roi.y, roi_width: roi.width, roi_height: roi.height,
+    red_hue_min: Number(fieldEl('hue_min').value),
+    red_hue_max: Number(fieldEl('hue_max').value),
+    red_hue_min2: Number(fieldEl('hue_min2').value),
+    red_hue_max2: Number(fieldEl('hue_max2').value),
+    min_saturation: Number(fieldEl('min_saturation').value),
+    min_value: Number(fieldEl('min_value').value),
+    red_pixel_threshold_percent: Number(fieldEl('threshold_percent').value),
+  };
+
+  snippetEl.textContent =
+`roi_x: ${roi.x.toFixed(3)}
+roi_y: ${roi.y.toFixed(3)}
+roi_width: ${roi.width.toFixed(3)}
+roi_height: ${roi.height.toFixed(3)}
+red_pixel_threshold_percent: ${fieldEl('threshold_percent').value}`;
+
+  const res = await fetch('/calibrate/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (data.error) {
+    resultEl.textContent = data.error;
+    resultEl.className = '';
+    return;
+  }
+  resultEl.textContent = `Red pixels: ${data.red_pct}% - ${data.detected ? 'Bin detected' : 'No bin'}`;
+  resultEl.className = data.detected ? 'detected' : 'clear';
+}
+
+fields.forEach((name) => fieldEl(name).addEventListener('change', () => { if (roi) preview(); }));
+document.getElementById('refresh').addEventListener('click', refreshSnapshot);
+document.getElementById('copy').addEventListener('click', () => {
+  navigator.clipboard.writeText(snippetEl.textContent);
+});
+
+loadOptions().then(refreshSnapshot);
+</script>
+</body>
+</html>
