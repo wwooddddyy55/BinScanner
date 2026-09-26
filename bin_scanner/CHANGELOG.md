@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+- Added infrared/night detection mode: since color is unavailable once the
+  camera switches to IR illuminators, detection now auto-detects this from
+  the snapshot's overall saturation and, in that mode, looks for the
+  largest blob that changed against a stored "bin confirmed absent"
+  reference photo instead of a color threshold. New options
+  `ir_saturation_threshold`, `ir_change_threshold_percent`, and
+  `ir_change_zscore`; capture/clear the reference from new
+  `/calibrate/ir-reference` endpoints (also exposed in the `/calibrate` UI).
+- If infrared mode is detected but no night reference has been captured yet,
+  `/scan` now fails *safe toward `detected: true`* (sends the notification)
+  rather than silently reporting "all clear" - for a bin-night reminder, a
+  missed detection is a worse outcome than one extra notification.
+- `/scan` and `/calibrate/preview` responses now include a `mode` field
+  (`color`, `infrared`, or `infrared-no-reference`).
+- `tools/calibrate.py` gained a `--reference` flag to test night detection
+  offline, and auto-detects which mode a given snapshot is in.
+
 ## 0.3.0
 
 - Switched default `camera_entity` and `roi_*` defaults from the doorbell to

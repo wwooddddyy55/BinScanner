@@ -21,6 +21,10 @@
   #result.clear { color: #6bffa0; }
   pre { background: #1b1b1b; border: 1px solid #333; padding: 0.75rem 1rem; border-radius: 6px; width: fit-content; }
   #status { color: #f0ad4e; margin-left: 0.75rem; }
+  #mode-badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.8rem; margin-left: 0.75rem; }
+  #mode-badge.color { background: #2d6cdf33; color: #7fb0ff; }
+  #mode-badge.infrared { background: #6b46c133; color: #b794f4; }
+  #ir-reference-status { margin: 0.5rem 0; color: #ccc; font-size: 0.9rem; }
 </style>
 </head>
 <body>
@@ -35,6 +39,7 @@
 
   <button id="refresh">Refresh snapshot</button>
   <span id="status"></span>
+  <span id="mode-badge"></span>
 
   <div id="canvas-wrap">
     <canvas id="canvas" width="800" height="600"></canvas>
@@ -64,6 +69,30 @@
     </fieldset>
 
     <fieldset>
+      <legend>Infrared (night) detection</legend>
+      <p class="hint" style="margin-top:0">
+        When the camera's IR illuminators are on, the image is monochrome and color detection can't
+        work at all - this mode instead compares the box against a stored "bin confirmed absent"
+        reference photo and looks for the largest blob of pixels that changed. Mode is picked
+        automatically per snapshot based on average color saturation.
+      </p>
+      <label>IR saturation threshold (below this = night mode) <input id="ir_saturation_threshold" type="number" min="0" max="255" step="1"></label>
+      <label>IR change threshold % <input id="ir_change_threshold_percent" type="number" min="0" max="100" step="0.5"></label>
+      <label>IR change sensitivity (z-score) <input id="ir_change_zscore" type="number" min="0" max="10" step="0.1"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Night reference</legend>
+      <div id="ir-reference-status">Checking...</div>
+      <p class="hint" style="margin-top:0">
+        Capture this once it's dark and you've confirmed the bin is <strong>not</strong> in frame.
+        Re-capture occasionally if the driveway's appearance drifts (dirt, leaves, seasons).
+      </p>
+      <button id="capture-ir-reference" class="secondary">Capture current snapshot as night reference</button>
+      <button id="clear-ir-reference" class="secondary">Clear night reference</button>
+    </fieldset>
+
+    <fieldset>
       <legend>Result</legend>
       <div id="result">Draw a box on the image to test</div>
       <div id="result-detail" class="hint"></div>
@@ -77,7 +106,10 @@ roi_width: -
 roi_height: -
 red_pixel_threshold_percent: -
 min_aspect_ratio: -
-max_aspect_ratio: -</pre>
+max_aspect_ratio: -
+ir_saturation_threshold: -
+ir_change_threshold_percent: -
+ir_change_zscore: -</pre>
   <button id="copy" class="secondary">Copy to clipboard</button>
 
 <script>
@@ -96,6 +128,7 @@ let dragStart = null;
 const fields = [
   'hue_min', 'hue_max', 'hue_min2', 'hue_max2', 'min_saturation', 'min_value',
   'threshold_percent', 'min_aspect_ratio', 'max_aspect_ratio',
+  'ir_saturation_threshold', 'ir_change_threshold_percent', 'ir_change_zscore',
 ];
 const fieldEl = (name) => document.getElementById(name);
 
@@ -111,7 +144,19 @@ async function loadOptions() {
   fieldEl('threshold_percent').value = opts.red_pixel_threshold_percent;
   fieldEl('min_aspect_ratio').value = opts.min_aspect_ratio;
   fieldEl('max_aspect_ratio').value = opts.max_aspect_ratio;
+  fieldEl('ir_saturation_threshold').value = opts.ir_saturation_threshold;
+  fieldEl('ir_change_threshold_percent').value = opts.ir_change_threshold_percent;
+  fieldEl('ir_change_zscore').value = opts.ir_change_zscore;
   roi = { x: opts.roi_x, y: opts.roi_y, width: opts.roi_width, height: opts.roi_height };
+}
+
+async function refreshIrReferenceStatus() {
+  const res = await fetch('/calibrate/ir-reference');
+  const data = await res.json();
+  const statusEl = document.getElementById('ir-reference-status');
+  statusEl.textContent = data.exists
+    ? `Captured: ${new Date(data.captured_at).toLocaleString()}`
+    : 'Not set - night detection will default to "still there" until one is captured.';
 }
 
 function draw() {
@@ -189,6 +234,9 @@ async function preview() {
     red_pixel_threshold_percent: Number(fieldEl('threshold_percent').value),
     min_aspect_ratio: Number(fieldEl('min_aspect_ratio').value),
     max_aspect_ratio: Number(fieldEl('max_aspect_ratio').value),
+    ir_saturation_threshold: Number(fieldEl('ir_saturation_threshold').value),
+    ir_change_threshold_percent: Number(fieldEl('ir_change_threshold_percent').value),
+    ir_change_zscore: Number(fieldEl('ir_change_zscore').value),
   };
 
   snippetEl.textContent =
@@ -198,7 +246,10 @@ roi_width: ${roi.width.toFixed(3)}
 roi_height: ${roi.height.toFixed(3)}
 red_pixel_threshold_percent: ${fieldEl('threshold_percent').value}
 min_aspect_ratio: ${fieldEl('min_aspect_ratio').value}
-max_aspect_ratio: ${fieldEl('max_aspect_ratio').value}`;
+max_aspect_ratio: ${fieldEl('max_aspect_ratio').value}
+ir_saturation_threshold: ${fieldEl('ir_saturation_threshold').value}
+ir_change_threshold_percent: ${fieldEl('ir_change_threshold_percent').value}
+ir_change_zscore: ${fieldEl('ir_change_zscore').value}`;
 
   const res = await fetch('/calibrate/preview', {
     method: 'POST',
@@ -207,16 +258,28 @@ max_aspect_ratio: ${fieldEl('max_aspect_ratio').value}`;
   });
   const data = await res.json();
   const detailEl = document.getElementById('result-detail');
+  const modeBadge = document.getElementById('mode-badge');
+
+  if (data.mode) {
+    const infrared = data.mode.startsWith('infrared');
+    modeBadge.textContent = infrared ? 'Infrared / night mode' : 'Color / daylight mode';
+    modeBadge.className = infrared ? 'infrared' : 'color';
+  }
+
   if (data.error) {
     resultEl.textContent = data.error;
     resultEl.className = '';
     detailEl.textContent = '';
     return;
   }
-  resultEl.textContent = `Largest blob: ${data.red_pct}% - ${data.detected ? 'Bin detected' : 'No bin'}`;
+  const blobLabel = data.mode === 'infrared' ? 'Largest changed blob' : 'Largest red blob';
+  const totalLabel = data.mode === 'infrared' ? 'Total changed area' : 'Total red in box';
+  resultEl.textContent = `${blobLabel}: ${data.red_pct}% - ${data.detected ? 'Bin detected' : 'No bin'}`;
   resultEl.className = data.detected ? 'detected' : 'clear';
   const aspectText = data.aspect_ratio === null ? 'n/a' : data.aspect_ratio;
-  detailEl.textContent = `Total red in box: ${data.total_red_pct}% - blob aspect ratio: ${aspectText}`;
+  detailEl.textContent =
+    `${totalLabel}: ${data.total_red_pct}% - blob aspect ratio: ${aspectText} - ` +
+    `avg. saturation: ${data.average_saturation}`;
 }
 
 fields.forEach((name) => fieldEl(name).addEventListener('change', () => { if (roi) preview(); }));
@@ -225,7 +288,26 @@ document.getElementById('copy').addEventListener('click', () => {
   navigator.clipboard.writeText(snippetEl.textContent);
 });
 
+document.getElementById('capture-ir-reference').addEventListener('click', async () => {
+  const statusEl = document.getElementById('ir-reference-status');
+  statusEl.textContent = 'Capturing...';
+  const res = await fetch('/calibrate/ir-reference', { method: 'POST' });
+  const data = await res.json();
+  if (data.error) {
+    statusEl.textContent = data.error;
+    return;
+  }
+  await refreshIrReferenceStatus();
+  if (roi) preview();
+});
+
+document.getElementById('clear-ir-reference').addEventListener('click', async () => {
+  await fetch('/calibrate/ir-reference', { method: 'DELETE' });
+  await refreshIrReferenceStatus();
+});
+
 loadOptions().then(refreshSnapshot);
+refreshIrReferenceStatus();
 </script>
 </body>
 </html>
