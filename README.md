@@ -23,9 +23,11 @@ HA automation (your own schedule, e.g. several checks through bin-night evening)
            - Color mode (daylight): largest connected "red" blob (HSV
              threshold + shape check, not just a raw pixel count)
            - Infrared mode (night/IR illuminators on, image is monochrome):
-             largest blob that changed vs. a stored "bin confirmed absent"
-             reference photo, since there's no color left to threshold
-        4. If that blob is big enough and roughly bin-shaped → calls your
+             largest blob that changed vs. a per-pixel baseline built from
+             several stored "bin confirmed absent" reference photos, since
+             there's no color left to threshold
+        4. If that blob is big enough and roughly bin-shaped, and (if
+           configured) it's held for enough consecutive scans → calls your
            notify.* service
 ```
 
@@ -43,13 +45,27 @@ dark, when the camera switches to IR illuminators and shoots monochrome),
 night detection isn't an edge case here — it's the mode most scans will
 actually run in. There's no color signal at all in a monochrome IR image,
 so instead of a color threshold, night detection compares the region against
-a **reference snapshot you capture once**, with the bin confirmed absent, at
-night. Anything that changed enough (and is shaped like the bin) counts as
-detected.
+a **baseline built from several reference snapshots you capture**, with the
+bin confirmed absent, ideally on a few different nights. Rather than diffing
+against one fixed image, this learns each pixel's own mean and spread across
+those samples — a spot that's normally noisy night to night (streetlight
+cycling, moonlight, IR-illuminator gain drift) earns a proportionally wider
+tolerance than a stable one, instead of one fixed threshold for the whole
+frame. Anything that deviates from its own baseline by enough (and is shaped
+like the bin) counts as changed.
 
 Mode is chosen automatically per snapshot (by checking the image's overall
 color saturation, not the clock), so this keeps working correctly across
 dusk transitions without you having to schedule around it.
+
+**Confirmation debounce:** if your HA automation checks more than once per
+evening, set `confirm_consecutive_scans` above its default of `1` to require
+that many consecutive `detected: true` scans before actually notifying —
+guards against a one-off false trigger (a headlight sweep, a passing shadow)
+firing the alert. `confirm_max_gap_minutes` resets the streak if scans are
+too far apart to plausibly be about the same evening. Leave this at the
+default if you only scan once per evening — with a single scan, requiring
+more than one consecutive detection means it would never fire.
 
 **Fail-safe policy:** if it's infrared mode and no night reference has been
 captured yet, the add-on defaults to `detected: true` (sends the
@@ -88,8 +104,13 @@ long-lived access token to create or manage.
      `0.3`–`4.0` are permissive, tighten them if you get false positives
      from an oddly-shaped object
    - `ir_saturation_threshold`, `ir_change_threshold_percent`,
-     `ir_change_zscore`: control infrared/night detection (see below) —
-     the defaults are a reasonable starting point, tune via `/calibrate`
+     `ir_change_zscore`, `ir_min_pixel_std`: control infrared/night detection
+     (see below) — the defaults are a reasonable starting point, tune via
+     `/calibrate`
+   - `ir_reference_max_samples`: how many night reference samples to keep
+     (oldest rolls off automatically); default `5`
+   - `confirm_consecutive_scans`, `confirm_max_gap_minutes`: optional
+     confirmation debounce (see below); defaults are effectively off (`1`)
 5. Start the add-on and check its log for `Running on http://0.0.0.0:8099`.
 
 ## 2. Calibrate the detection region
@@ -130,12 +151,18 @@ add-on.
 **Capturing the night reference:** since most checks here happen after dark,
 this step matters — go out at night once with the bin confirmed **not** in
 frame, open `/calibrate`, click **Refresh snapshot** (the mode badge should
-read "Infrared / night mode"), then click **Capture current snapshot as
-night reference** in the Night reference panel. Re-draw the box and check
-"Bin detected" reads false with the bin away and true once you put it back,
-adjusting `ir_change_threshold_percent`/`ir_change_zscore` as needed. If the
-driveway's appearance drifts noticeably over time (dirt, leaves, seasons),
-just re-capture the reference the same way.
+read "Infrared / night mode"), then click **Capture current snapshot as a
+night reference sample** in the Night reference samples panel. Repeat this
+on a few different nights (different moon/streetlight/weather conditions) if
+you can — the baseline is built across all captured samples, so more of them
+means a better sense of what's normal noise vs. a real change. A single
+sample still works, it just falls back to a fixed threshold like before.
+Re-draw the box and check "Bin detected" reads false with the bin away and
+true once you put it back, adjusting
+`ir_change_threshold_percent`/`ir_change_zscore`/`ir_min_pixel_std` as
+needed. The oldest sample is dropped automatically once you're above
+`ir_reference_max_samples`, so re-capturing occasionally also keeps the
+baseline current as the driveway's appearance drifts (dirt, leaves, seasons).
 
 ### Option B: offline CLI tool
 
@@ -151,9 +178,9 @@ python3 tools/calibrate.py garage_snapshot.jpg \
     --roi-x 0.80 --roi-y 0.43 --roi-width 0.08 --roi-height 0.23 \
     --save-roi /tmp/roi_preview.png
 
-# Night/infrared mode - pass a reference photo taken with the bin confirmed absent
+# Night/infrared mode - pass one or more reference photos taken with the bin confirmed absent
 python3 tools/calibrate.py garage_snapshot_night.jpg \
-    --reference garage_empty_night.jpg \
+    --reference garage_empty_night1.jpg --reference garage_empty_night2.jpg \
     --roi-x 0.80 --roi-y 0.43 --roi-width 0.08 --roi-height 0.23
 ```
 
@@ -161,7 +188,9 @@ The tool auto-detects which mode a snapshot is in (by its overall color
 saturation) and runs the matching detector, printing the total/blob
 percentages, aspect ratio, and whether it would be detected. Use
 `--min-aspect-ratio`/`--max-aspect-ratio` to try different shape bounds, and
-`--ir-change-zscore` to tune night sensitivity.
+`--ir-change-zscore`/`--ir-min-pixel-std` to tune night sensitivity.
+`--reference` is repeatable - pass several samples to build a per-pixel
+baseline the same way `/calibrate`'s night reference panel does.
 
 `roi_x`/`roi_y` are the top-left corner as a fraction (0–1) of the image
 width/height; `roi_width`/`roi_height` are the box size the same way — this
@@ -195,11 +224,15 @@ without sending a notification, e.g. from the **Terminal & SSH** add-on:
 
 ```bash
 curl -X POST "http://<addon-hostname>:8099/scan?dry_run=true"
-# {"detected": true, "red_pct": 14.32, "mode": "infrared", "notified": false, "dry_run": true}
+# {"detected": true, "confirmed": true, "red_pct": 14.32, "mode": "infrared", "notified": false, "dry_run": true}
 ```
 
 `mode` is `color`, `infrared`, or `infrared-no-reference` (the fail-safe
 case — see the add-on log for a reminder to capture a night reference).
+`confirmed` is what actually gates the notification: it equals `detected`
+unless `confirm_consecutive_scans` is set above `1`, in which case it only
+turns `true` once that many consecutive scans came back detected (see
+Confirmation debounce above).
 
 ## Repository layout
 

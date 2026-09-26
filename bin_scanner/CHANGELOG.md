@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.0
+
+- Infrared/night detection now builds its baseline from **multiple** "bin
+  confirmed absent" reference samples instead of one fixed image: for each
+  pixel it learns a mean and stddev across the captured samples, so a spot
+  that's normally noisy from night to night (streetlight cycling, moonlight,
+  IR-illuminator gain drift) gets a proportionally wider tolerance instead of
+  every pixel sharing one fixed threshold. A single sample still works (falls
+  back to the new `ir_min_pixel_std` floor, close to the old behavior).
+  `detect_bin_by_change`/`analyze_change_blob` are replaced by
+  `detect_bin_by_change_multi`/`analyze_change_blob_multi`; `tools/calibrate.py`'s
+  `--reference` flag is now repeatable.
+- The night reference is now a rolling set of samples captured one at a time
+  from `/calibrate` (new `ir_reference_max_samples` option, default 5; the
+  oldest sample is dropped automatically past that count) instead of a single
+  file, so re-capturing periodically both grows the baseline and keeps it
+  current as the scene drifts (dirt, leaves, seasons).
+- Added an optional confirmation debounce: `confirm_consecutive_scans` (only
+  useful if an HA automation scans more than once per evening) requires that
+  many consecutive `detected: true` scans before notifying, guarding against
+  a one-off false trigger (a headlight sweep, a passing shadow) firing the
+  alert; `confirm_max_gap_minutes` resets the streak if scans are too far
+  apart to plausibly be the same evening. Defaults to `1` (off) to preserve
+  existing single-scan-per-night behavior. The fail-safe
+  `infrared-no-reference` case always notifies immediately regardless, since
+  it's a configuration gap rather than a noisy measurement.
+- `/scan` responses now include a `confirmed` field - what actually gates the
+  notification, distinct from the raw `detected` result of this one scan.
+  `/calibrate/preview` is unaffected (it tests detection directly, without the
+  scan-history-dependent debounce).
+
 ## 0.4.0
 
 - Added infrared/night detection mode: since color is unavailable once the

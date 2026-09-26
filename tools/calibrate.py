@@ -9,10 +9,12 @@ Day/color mode example:
         --roi-x 0.30 --roi-y 0.55 --roi-width 0.25 --roi-height 0.25 \\
         --save-roi /tmp/roi_preview.png
 
-Night/infrared mode example (pass a reference photo taken with the bin
-confirmed absent, at night):
+Night/infrared mode example (pass one or more reference photos taken with the
+bin confirmed absent, at night - several samples, ideally from different
+nights, let detection learn each pixel's normal night-to-night variation
+instead of comparing against one fixed image):
     python3 tools/calibrate.py garage_snapshot_night.jpg \\
-        --reference garage_empty_night.jpg \\
+        --reference garage_empty_night1.jpg --reference garage_empty_night2.jpg \\
         --roi-x 0.30 --roi-y 0.55 --roi-width 0.25 --roi-height 0.25
 """
 from __future__ import annotations
@@ -27,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin_scanner" / 
 from detector import (  # noqa: E402
     HsvThresholds,
     Roi,
-    analyze_change_blob,
+    analyze_change_blob_multi,
     analyze_red_blob,
     average_saturation,
     crop_roi,
@@ -42,8 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reference",
         metavar="PATH",
+        action="append",
+        default=[],
         help="Night reference image (bin confirmed absent) - if given, runs change-based "
-        "(infrared/night) detection instead of color detection",
+        "(infrared/night) detection instead of color detection. Repeatable - passing "
+        "several samples (ideally from different nights) builds a per-pixel baseline "
+        "instead of comparing against a single fixed image.",
     )
     parser.add_argument("--roi-x", type=float, default=0.30)
     parser.add_argument("--roi-y", type=float, default=0.55)
@@ -66,7 +72,16 @@ def parse_args() -> argparse.Namespace:
         "--ir-change-zscore",
         type=float,
         default=1.0,
-        help="Night mode only: how many std-devs of luminance change counts as 'different'",
+        help="Night mode only: how many std-devs of luminance change (relative to a pixel's "
+        "own historical spread across the reference samples) counts as 'different'",
+    )
+    parser.add_argument(
+        "--ir-min-pixel-std",
+        type=float,
+        default=1.0,
+        help="Night mode only: floor for a pixel's historical stddev, so a pixel that never "
+        "varied across the reference samples doesn't become infinitely sensitive (the default "
+        "of 1.0 reproduces the original single-reference-only comparison exactly)",
     )
     parser.add_argument(
         "--ir-saturation-threshold",
@@ -89,7 +104,7 @@ def main() -> int:
     image.load()
 
     avg_sat = average_saturation(image)
-    infrared = args.reference is not None or is_infrared_mode(image, args.ir_saturation_threshold)
+    infrared = bool(args.reference) or is_infrared_mode(image, args.ir_saturation_threshold)
 
     print(f"Image size:           {image.size[0]}x{image.size[1]}")
     print(f"ROI:                  x={roi.x} y={roi.y} width={roi.width} height={roi.height}")
@@ -99,23 +114,27 @@ def main() -> int:
     if infrared:
         if not args.reference:
             print("\nThis looks like a night/infrared shot, but no --reference was given.")
-            print("Pass --reference <path to a night photo with the bin confirmed absent> to test detection.")
+            print("Pass one or more --reference <path> (bin confirmed absent) to test detection.")
             return 1
 
-        reference = Image.open(args.reference)
-        reference.load()
+        references = []
+        for reference_path in args.reference:
+            reference = Image.open(reference_path)
+            reference.load()
+            references.append(reference)
 
-        analysis = analyze_change_blob(image, reference, roi, args.ir_change_zscore)
+        analysis = analyze_change_blob_multi(image, references, roi, args.ir_change_zscore, args.ir_min_pixel_std)
         shape_ok = (
             analysis.aspect_ratio is not None
             and args.min_aspect_ratio <= analysis.aspect_ratio <= args.max_aspect_ratio
         )
         detected = analysis.blob_pct >= args.threshold_percent and shape_ok
 
+        print(f"Reference samples:    {len(references)}")
         print(f"Total changed area:   {analysis.total_pct:.2f}%")
         print(f"Largest changed blob: {analysis.blob_pct:.2f}% ({analysis.blob_pixel_count} px)")
         print(f"Blob aspect ratio:    {analysis.aspect_ratio}")
-        print(f"Change sensitivity:   {args.ir_change_zscore} std-devs")
+        print(f"Change sensitivity:   {args.ir_change_zscore} std-devs (min pixel std: {args.ir_min_pixel_std})")
     else:
         thresholds = HsvThresholds(
             hue_min=args.hue_min,

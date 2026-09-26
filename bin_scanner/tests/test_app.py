@@ -17,13 +17,16 @@ def app_module(tmp_path, monkeypatch):
         "red_pixel_threshold_percent": 10.0,
         "min_aspect_ratio": 0.3, "max_aspect_ratio": 4.0,
         "ir_saturation_threshold": 15.0, "ir_change_threshold_percent": 10.0, "ir_change_zscore": 1.0,
+        "ir_min_pixel_std": 1.0, "ir_reference_max_samples": 5,
+        "confirm_consecutive_scans": 1, "confirm_max_gap_minutes": 180.0,
         "notify_title": "Bin check", "notify_message": "The bin is still out front.",
         "log_level": "info",
     }
     options_path = tmp_path / "options.json"
     options_path.write_text(json.dumps(options))
     monkeypatch.setenv("BIN_SCANNER_OPTIONS", str(options_path))
-    monkeypatch.setenv("BIN_SCANNER_IR_REFERENCE", str(tmp_path / "ir_reference.jpg"))
+    monkeypatch.setenv("BIN_SCANNER_IR_REFERENCE_DIR", str(tmp_path / "ir_reference"))
+    monkeypatch.setenv("BIN_SCANNER_SCAN_STATE", str(tmp_path / "scan_state.json"))
     monkeypatch.setenv("SUPERVISOR_TOKEN", "fake-token")
 
     import importlib
@@ -120,15 +123,30 @@ def test_capture_and_clear_ir_reference(client, app_module, monkeypatch):
 
     capture_res = client.post("/calibrate/ir-reference")
     assert capture_res.status_code == 200
+    assert capture_res.get_json()["count"] == 1
 
     status_res = client.get("/calibrate/ir-reference")
     status = status_res.get_json()
     assert status["exists"] is True
+    assert status["count"] == 1
     assert status["captured_at"] is not None
 
     delete_res = client.delete("/calibrate/ir-reference")
     assert delete_res.status_code == 200
     assert client.get("/calibrate/ir-reference").get_json()["exists"] is False
+
+
+def test_capture_ir_reference_rolls_off_oldest_beyond_max_samples(client, app_module, monkeypatch):
+    app_module.OPTIONS["ir_reference_max_samples"] = 2
+    monkeypatch.setattr(app_module, "fetch_camera_snapshot", lambda camera_entity, timeout=15.0: night_snapshot_bytes())
+
+    for _ in range(3):
+        client.get("/calibrate/snapshot")
+        capture_res = client.post("/calibrate/ir-reference")
+        assert capture_res.status_code == 200
+
+    status = client.get("/calibrate/ir-reference").get_json()
+    assert status["count"] == 2
 
 
 def test_scan_infrared_without_reference_defaults_to_detected(client, app_module, monkeypatch):
@@ -142,12 +160,14 @@ def test_scan_infrared_without_reference_defaults_to_detected(client, app_module
     assert res.status_code == 200
     data = res.get_json()
     assert data["detected"] is True
+    assert data["confirmed"] is True
     assert data["mode"] == "infrared-no-reference"
     assert notified.get("called") is True
 
 
 def test_scan_infrared_with_reference_uses_change_detection(client, app_module, monkeypatch):
-    app_module.IR_REFERENCE_PATH.write_bytes(night_snapshot_bytes())
+    app_module.IR_REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    (app_module.IR_REFERENCE_DIR / "0.jpg").write_bytes(night_snapshot_bytes())
     monkeypatch.setattr(
         app_module,
         "fetch_camera_snapshot",
@@ -160,6 +180,75 @@ def test_scan_infrared_with_reference_uses_change_detection(client, app_module, 
     data = res.get_json()
     assert data["mode"] == "infrared"
     assert data["detected"] is True
+    assert data["confirmed"] is True
+
+
+def test_scan_uses_multiple_reference_samples_for_adaptive_baseline(client, app_module, monkeypatch):
+    app_module.IR_REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    for i in range(3):
+        (app_module.IR_REFERENCE_DIR / f"{i}.jpg").write_bytes(night_snapshot_bytes())
+    monkeypatch.setattr(
+        app_module, "fetch_camera_snapshot", lambda camera_entity, timeout=15.0: night_snapshot_bytes()
+    )
+    monkeypatch.setattr(app_module, "call_notify_service", lambda *a, **k: None)
+
+    res = client.post("/scan")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["mode"] == "infrared"
+    assert data["detected"] is False
+
+
+def test_scan_confirmation_debounce_requires_consecutive_detections(client, app_module, monkeypatch):
+    app_module.OPTIONS["confirm_consecutive_scans"] = 2
+    app_module.IR_REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    (app_module.IR_REFERENCE_DIR / "0.jpg").write_bytes(night_snapshot_bytes())
+    monkeypatch.setattr(
+        app_module,
+        "fetch_camera_snapshot",
+        lambda camera_entity, timeout=15.0: night_snapshot_bytes(patch=(140, 100, 260, 260)),
+    )
+    notified = []
+    monkeypatch.setattr(app_module, "call_notify_service", lambda *a, **k: notified.append(True))
+
+    first = client.post("/scan").get_json()
+    assert first["detected"] is True
+    assert first["confirmed"] is False
+    assert first["notified"] is False
+    assert notified == []
+
+    second = client.post("/scan").get_json()
+    assert second["detected"] is True
+    assert second["confirmed"] is True
+    assert second["notified"] is True
+    assert notified == [True]
+
+
+def test_scan_confirmation_streak_resets_after_a_clear_scan(client, app_module, monkeypatch):
+    app_module.OPTIONS["confirm_consecutive_scans"] = 2
+    app_module.IR_REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    (app_module.IR_REFERENCE_DIR / "0.jpg").write_bytes(night_snapshot_bytes())
+    monkeypatch.setattr(app_module, "call_notify_service", lambda *a, **k: None)
+
+    monkeypatch.setattr(
+        app_module, "fetch_camera_snapshot",
+        lambda camera_entity, timeout=15.0: night_snapshot_bytes(patch=(140, 100, 260, 260)),
+    )
+    first = client.post("/scan").get_json()
+    assert first["confirmed"] is False
+
+    monkeypatch.setattr(
+        app_module, "fetch_camera_snapshot", lambda camera_entity, timeout=15.0: night_snapshot_bytes()
+    )
+    clear_scan = client.post("/scan").get_json()
+    assert clear_scan["detected"] is False
+
+    monkeypatch.setattr(
+        app_module, "fetch_camera_snapshot",
+        lambda camera_entity, timeout=15.0: night_snapshot_bytes(patch=(140, 100, 260, 260)),
+    )
+    third = client.post("/scan").get_json()
+    assert third["confirmed"] is False  # streak restarted, this is only the first detection again
 
 
 def test_calibrate_preview_infrared_without_reference_errors(client, app_module, monkeypatch):

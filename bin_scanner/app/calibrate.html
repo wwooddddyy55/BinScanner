@@ -72,24 +72,42 @@
       <legend>Infrared (night) detection</legend>
       <p class="hint" style="margin-top:0">
         When the camera's IR illuminators are on, the image is monochrome and color detection can't
-        work at all - this mode instead compares the box against a stored "bin confirmed absent"
-        reference photo and looks for the largest blob of pixels that changed. Mode is picked
+        work at all - this mode instead compares the box against a per-pixel baseline (mean + spread)
+        built from several stored "bin confirmed absent" reference photos, and looks for the largest
+        blob of pixels that changed more than that pixel's own historical spread. Mode is picked
         automatically per snapshot based on average color saturation.
       </p>
       <label>IR saturation threshold (below this = night mode) <input id="ir_saturation_threshold" type="number" min="0" max="255" step="1"></label>
       <label>IR change threshold % <input id="ir_change_threshold_percent" type="number" min="0" max="100" step="0.5"></label>
       <label>IR change sensitivity (z-score) <input id="ir_change_zscore" type="number" min="0" max="10" step="0.1"></label>
+      <label>IR min pixel spread (floor) <input id="ir_min_pixel_std" type="number" min="0" max="5" step="0.05"></label>
     </fieldset>
 
     <fieldset>
-      <legend>Night reference</legend>
+      <legend>Night reference samples</legend>
       <div id="ir-reference-status">Checking...</div>
       <p class="hint" style="margin-top:0">
-        Capture this once it's dark and you've confirmed the bin is <strong>not</strong> in frame.
-        Re-capture occasionally if the driveway's appearance drifts (dirt, leaves, seasons).
+        Capture one whenever it's dark and you've confirmed the bin is <strong>not</strong> in frame -
+        ideally on a few different nights (different moon/streetlight/weather conditions), since the
+        baseline is built across all captured samples. The oldest sample is dropped automatically once
+        you're above the max, so re-capturing occasionally also keeps the baseline current as the
+        driveway's appearance drifts (dirt, leaves, seasons).
       </p>
-      <button id="capture-ir-reference" class="secondary">Capture current snapshot as night reference</button>
-      <button id="clear-ir-reference" class="secondary">Clear night reference</button>
+      <button id="capture-ir-reference" class="secondary">Capture current snapshot as a night reference sample</button>
+      <button id="clear-ir-reference" class="secondary">Clear all night reference samples</button>
+    </fieldset>
+
+    <fieldset>
+      <legend>Confirmation debounce</legend>
+      <p class="hint" style="margin-top:0">
+        Require this many consecutive detected scans before notifying, instead of acting on a single
+        frame - guards against a one-off false trigger (headlight sweep, a passing shadow). Only useful
+        if the Home Assistant automation calls <code>/scan</code> more than once per evening; leave at 1
+        (its default) otherwise, or a single nightly scan will never confirm. A gap longer than the max
+        gap resets the streak so it can't carry over from a previous night.
+      </p>
+      <label>Consecutive scans required <input id="confirm_consecutive_scans" type="number" min="1" max="10" step="1"></label>
+      <label>Max gap between scans (minutes) <input id="confirm_max_gap_minutes" type="number" min="1" max="1440" step="1"></label>
     </fieldset>
 
     <fieldset>
@@ -109,7 +127,10 @@ min_aspect_ratio: -
 max_aspect_ratio: -
 ir_saturation_threshold: -
 ir_change_threshold_percent: -
-ir_change_zscore: -</pre>
+ir_change_zscore: -
+ir_min_pixel_std: -
+confirm_consecutive_scans: -
+confirm_max_gap_minutes: -</pre>
   <button id="copy" class="secondary">Copy to clipboard</button>
 
 <script>
@@ -128,7 +149,8 @@ let dragStart = null;
 const fields = [
   'hue_min', 'hue_max', 'hue_min2', 'hue_max2', 'min_saturation', 'min_value',
   'threshold_percent', 'min_aspect_ratio', 'max_aspect_ratio',
-  'ir_saturation_threshold', 'ir_change_threshold_percent', 'ir_change_zscore',
+  'ir_saturation_threshold', 'ir_change_threshold_percent', 'ir_change_zscore', 'ir_min_pixel_std',
+  'confirm_consecutive_scans', 'confirm_max_gap_minutes',
 ];
 const fieldEl = (name) => document.getElementById(name);
 
@@ -147,6 +169,9 @@ async function loadOptions() {
   fieldEl('ir_saturation_threshold').value = opts.ir_saturation_threshold;
   fieldEl('ir_change_threshold_percent').value = opts.ir_change_threshold_percent;
   fieldEl('ir_change_zscore').value = opts.ir_change_zscore;
+  fieldEl('ir_min_pixel_std').value = opts.ir_min_pixel_std;
+  fieldEl('confirm_consecutive_scans').value = opts.confirm_consecutive_scans;
+  fieldEl('confirm_max_gap_minutes').value = opts.confirm_max_gap_minutes;
   roi = { x: opts.roi_x, y: opts.roi_y, width: opts.roi_width, height: opts.roi_height };
 }
 
@@ -154,9 +179,12 @@ async function refreshIrReferenceStatus() {
   const res = await fetch('/calibrate/ir-reference');
   const data = await res.json();
   const statusEl = document.getElementById('ir-reference-status');
-  statusEl.textContent = data.exists
-    ? `Captured: ${new Date(data.captured_at).toLocaleString()}`
-    : 'Not set - night detection will default to "still there" until one is captured.';
+  if (!data.exists) {
+    statusEl.textContent = 'No samples captured - night detection will default to "still there" until one is captured.';
+    return;
+  }
+  const latest = new Date(data.captured_at).toLocaleString();
+  statusEl.textContent = `${data.count}/${data.max_samples} samples captured - latest: ${latest}`;
 }
 
 function draw() {
@@ -237,6 +265,7 @@ async function preview() {
     ir_saturation_threshold: Number(fieldEl('ir_saturation_threshold').value),
     ir_change_threshold_percent: Number(fieldEl('ir_change_threshold_percent').value),
     ir_change_zscore: Number(fieldEl('ir_change_zscore').value),
+    ir_min_pixel_std: Number(fieldEl('ir_min_pixel_std').value),
   };
 
   snippetEl.textContent =
@@ -249,7 +278,10 @@ min_aspect_ratio: ${fieldEl('min_aspect_ratio').value}
 max_aspect_ratio: ${fieldEl('max_aspect_ratio').value}
 ir_saturation_threshold: ${fieldEl('ir_saturation_threshold').value}
 ir_change_threshold_percent: ${fieldEl('ir_change_threshold_percent').value}
-ir_change_zscore: ${fieldEl('ir_change_zscore').value}`;
+ir_change_zscore: ${fieldEl('ir_change_zscore').value}
+ir_min_pixel_std: ${fieldEl('ir_min_pixel_std').value}
+confirm_consecutive_scans: ${fieldEl('confirm_consecutive_scans').value}
+confirm_max_gap_minutes: ${fieldEl('confirm_max_gap_minutes').value}`;
 
   const res = await fetch('/calibrate/preview', {
     method: 'POST',
