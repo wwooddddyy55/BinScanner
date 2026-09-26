@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+- `/calibrate` is now mobile-friendly: added a viewport meta tag, touch
+  support for drawing the ROI box (drag-to-select now works with a finger,
+  not just a mouse), and a responsive layout that stacks cleanly on a phone
+  screen instead of relying on a fixed-width desktop layout.
+- Added a `webui` entry to `config.yaml` pointing at `/calibrate`, so Home
+  Assistant shows an **OPEN WEB UI** button straight to the calibration page
+  from the add-on's own page (next to the Configuration tab).
+
 ## 0.5.0
 
 - Infrared/night detection now builds its baseline from **multiple** "bin
