@@ -1,5 +1,5 @@
 name: Bin Scanner
-version: "0.4.0"
+version: "0.5.0"
 slug: bin_scanner
 description: Checks a Home Assistant camera snapshot for a red-lidded bin left out front, and sends a notification if it's still there.
 url: https://github.com/wwooddddyy55/binscanner
@@ -36,6 +36,10 @@ options:
   ir_saturation_threshold: 15.0
   ir_change_threshold_percent: 12.0
   ir_change_zscore: 1.0
+  ir_min_pixel_std: 1.0
+  ir_reference_max_samples: 5
+  confirm_consecutive_scans: 1
+  confirm_max_gap_minutes: 180.0
   notify_title: "Bin check"
   notify_message: "The bin is still out front — don't forget to bring it in."
   log_level: info
@@ -58,6 +62,10 @@ schema:
   ir_saturation_threshold: float(0,255)
   ir_change_threshold_percent: float(0,100)
   ir_change_zscore: float(0,10)
+  ir_min_pixel_std: float(0,5)
+  ir_reference_max_samples: int(1,20)
+  confirm_consecutive_scans: int(1,10)
+  confirm_max_gap_minutes: float(1,1440)
   notify_title: str
   notify_message: str
   log_level: list(debug|info|warning|error)

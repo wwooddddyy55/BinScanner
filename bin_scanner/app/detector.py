@@ -9,8 +9,15 @@ Two detection modes share the same blob-analysis machinery:
 - Color mode (daylight): find the largest red-hued blob in the ROI.
 - Infrared mode (night, camera on IR illuminators): color is physically
   unavailable in a monochrome IR image, so instead this compares the ROI's
-  luminance against a stored reference snapshot taken with the bin
-  confirmed absent, and finds the largest blob of pixels that changed.
+  luminance against a baseline built from several reference snapshots taken
+  with the bin confirmed absent, and finds the largest blob of pixels that
+  changed relative to that baseline.
+
+The infrared baseline is per-pixel mean + stddev across multiple reference
+samples (not a single fixed image), so a spot that's normally noisy from
+night to night - streetlight cycling, moonlight, IR-illuminator gain drift -
+gets a proportionally wider tolerance than a stable one, instead of every
+pixel sharing one fixed threshold.
 
 Both modes end up with a "mask of interesting pixels" that gets analyzed
 identically (largest connected blob size % and bounding-box aspect ratio),
@@ -191,7 +198,7 @@ def detect_red_bin(
     red car passing in the background, a few red leaves. The aspect-ratio
     bounds add a second filter against a blob shaped nothing like the bin
     (e.g. a thin streak of glare). Only usable in daylight/color mode - see
-    detect_bin_by_change for infrared/night mode.
+    detect_bin_by_change_multi for infrared/night mode.
     """
     image = Image.open(BytesIO(image_bytes))
     image.load()
@@ -254,65 +261,115 @@ def _zscore_normalize(values: List[int]) -> List[float]:
     return [(v - mean) / std for v in values]
 
 
-def _change_mask(
-    current_crop: Image.Image, reference_crop: Image.Image, change_zscore: float
-) -> Tuple[List[List[bool]], int, int]:
-    """Compares two same-size crops by normalized luminance.
+def _normalized_luminance(crop: Image.Image) -> List[float]:
+    return _zscore_normalize(list(crop.convert("L").getdata()))
 
-    Z-score normalizing each crop before comparing corrects for the global
-    brightness/exposure differences between shots (IR illuminator intensity,
-    auto-exposure/gain) that would otherwise swamp a raw pixel-value diff.
+
+def _pixel_mean_std(samples: List[List[float]]) -> Tuple[List[float], List[float]]:
+    """Per-index mean and stddev across several equal-length sample lists.
+
+    Used to build the infrared baseline from multiple reference snapshots:
+    each list is one reference's normalized luminance, so index i's mean/std
+    describe how that one pixel position has historically looked/varied.
     """
-    width, height = current_crop.size
-    cur_values = list(current_crop.convert("L").getdata())
-    ref_values = list(reference_crop.convert("L").getdata())
+    n = len(samples)
+    length = len(samples[0]) if samples else 0
+    means = [0.0] * length
+    stds = [0.0] * length
+    for i in range(length):
+        values = [sample[i] for sample in samples]
+        mean = sum(values) / n
+        variance = sum((v - mean) ** 2 for v in values) / n
+        means[i] = mean
+        stds[i] = variance ** 0.5
+    return means, stds
 
-    cur_norm = _zscore_normalize(cur_values)
-    ref_norm = _zscore_normalize(ref_values)
 
+def _change_mask_adaptive(
+    current_norm: List[float],
+    pixel_mean: List[float],
+    pixel_std: List[float],
+    width: int,
+    height: int,
+    change_zscore: float,
+    min_pixel_std: float,
+) -> List[List[bool]]:
+    """Flags a pixel as changed when it deviates from its own historical
+    baseline by more than `change_zscore` multiples of that pixel's own
+    historical stddev (floored at `min_pixel_std` so a pixel that has never
+    varied across the reference samples doesn't become infinitely sensitive).
+    """
     mask: List[List[bool]] = []
     idx = 0
     for _y in range(height):
         row = []
         for _x in range(width):
-            row.append(abs(cur_norm[idx] - ref_norm[idx]) >= change_zscore)
+            std = max(pixel_std[idx], min_pixel_std)
+            row.append(abs(current_norm[idx] - pixel_mean[idx]) / std >= change_zscore)
             idx += 1
         mask.append(row)
+    return mask
 
-    return mask, width, height
 
+def analyze_change_blob_multi(
+    current: Image.Image,
+    references: List[Image.Image],
+    roi: Roi,
+    change_zscore: float,
+    min_pixel_std: float = 1.0,
+) -> BlobAnalysis:
+    if not references:
+        raise ValueError("At least one reference snapshot is required")
 
-def analyze_change_blob(current: Image.Image, reference: Image.Image, roi: Roi, change_zscore: float) -> BlobAnalysis:
     current_crop = crop_roi(current.convert("RGB"), roi)
-    reference_crop = crop_roi(reference.convert("RGB"), roi)
-    if reference_crop.size != current_crop.size:
-        reference_crop = reference_crop.resize(current_crop.size)
+    width, height = current_crop.size
+    current_norm = _normalized_luminance(current_crop)
 
-    mask, width, height = _change_mask(current_crop, reference_crop, change_zscore)
+    reference_samples = []
+    for reference in references:
+        reference_crop = crop_roi(reference.convert("RGB"), roi)
+        if reference_crop.size != current_crop.size:
+            reference_crop = reference_crop.resize(current_crop.size)
+        reference_samples.append(_normalized_luminance(reference_crop))
+
+    pixel_mean, pixel_std = _pixel_mean_std(reference_samples)
+    mask = _change_mask_adaptive(current_norm, pixel_mean, pixel_std, width, height, change_zscore, min_pixel_std)
     return _analyze_mask(mask, width, height)
 
 
-def detect_bin_by_change(
+def detect_bin_by_change_multi(
     image_bytes: bytes,
-    reference_bytes: bytes,
+    reference_bytes_list: List[bytes],
     roi: Roi,
     threshold_percent: float,
     change_zscore: float = 1.0,
+    min_pixel_std: float = 1.0,
     min_aspect_ratio: float = 0.0,
     max_aspect_ratio: float = float("inf"),
 ) -> DetectionResult:
     """Infrared/night detection: color is unavailable, so this looks for the
-    largest blob of pixels in the ROI whose normalized luminance differs from
-    a reference snapshot taken with the bin confirmed absent (see
-    is_infrared_mode / is_infrared_snapshot to decide when to use this
-    instead of detect_red_bin).
+    largest blob of pixels in the ROI whose normalized luminance deviates
+    from a per-pixel baseline (mean + stddev) built from several reference
+    snapshots taken with the bin confirmed absent (see is_infrared_mode /
+    is_infrared_snapshot to decide when to use this instead of
+    detect_red_bin). A single reference snapshot still works - every pixel's
+    stddev is then 0, floored to min_pixel_std (whose default of 1.0
+    reproduces the original single-reference-only comparison exactly) - but
+    several samples taken on different nights let genuinely noisy spots earn
+    a wider tolerance instead of every pixel sharing one fixed threshold.
     """
+    if not reference_bytes_list:
+        raise ValueError("At least one reference snapshot is required")
+
     image = Image.open(BytesIO(image_bytes))
     image.load()
-    reference = Image.open(BytesIO(reference_bytes))
-    reference.load()
+    references = []
+    for reference_bytes in reference_bytes_list:
+        reference = Image.open(BytesIO(reference_bytes))
+        reference.load()
+        references.append(reference)
 
-    analysis = analyze_change_blob(image, reference, roi, change_zscore)
+    analysis = analyze_change_blob_multi(image, references, roi, change_zscore, min_pixel_std)
 
     shape_ok = (
         analysis.aspect_ratio is not None
