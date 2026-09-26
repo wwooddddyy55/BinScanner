@@ -53,8 +53,20 @@
     </fieldset>
 
     <fieldset>
+      <legend>Blob shape filter</legend>
+      <p class="hint" style="margin-top:0">
+        Detection only counts the single largest connected red blob in the box (not scattered red
+        pixels), and its bounding-box height/width ratio must fall in this range - rejects thin
+        streaks like glare or a sliver of a passing car.
+      </p>
+      <label>Min aspect ratio (height/width) <input id="min_aspect_ratio" type="number" min="0" max="20" step="0.1"></label>
+      <label>Max aspect ratio (height/width) <input id="max_aspect_ratio" type="number" min="0" max="20" step="0.1"></label>
+    </fieldset>
+
+    <fieldset>
       <legend>Result</legend>
       <div id="result">Draw a box on the image to test</div>
+      <div id="result-detail" class="hint"></div>
     </fieldset>
   </div>
 
@@ -63,7 +75,9 @@
 roi_y: -
 roi_width: -
 roi_height: -
-red_pixel_threshold_percent: -</pre>
+red_pixel_threshold_percent: -
+min_aspect_ratio: -
+max_aspect_ratio: -</pre>
   <button id="copy" class="secondary">Copy to clipboard</button>
 
 <script>
@@ -79,7 +93,10 @@ let roi = null; // {x, y, width, height} normalized 0-1
 let dragging = false;
 let dragStart = null;
 
-const fields = ['hue_min', 'hue_max', 'hue_min2', 'hue_max2', 'min_saturation', 'min_value', 'threshold_percent'];
+const fields = [
+  'hue_min', 'hue_max', 'hue_min2', 'hue_max2', 'min_saturation', 'min_value',
+  'threshold_percent', 'min_aspect_ratio', 'max_aspect_ratio',
+];
 const fieldEl = (name) => document.getElementById(name);
 
 async function loadOptions() {
@@ -92,6 +109,8 @@ async function loadOptions() {
   fieldEl('min_saturation').value = opts.min_saturation;
   fieldEl('min_value').value = opts.min_value;
   fieldEl('threshold_percent').value = opts.red_pixel_threshold_percent;
+  fieldEl('min_aspect_ratio').value = opts.min_aspect_ratio;
+  fieldEl('max_aspect_ratio').value = opts.max_aspect_ratio;
   roi = { x: opts.roi_x, y: opts.roi_y, width: opts.roi_width, height: opts.roi_height };
 }
 
@@ -168,6 +187,8 @@ async function preview() {
     min_saturation: Number(fieldEl('min_saturation').value),
     min_value: Number(fieldEl('min_value').value),
     red_pixel_threshold_percent: Number(fieldEl('threshold_percent').value),
+    min_aspect_ratio: Number(fieldEl('min_aspect_ratio').value),
+    max_aspect_ratio: Number(fieldEl('max_aspect_ratio').value),
   };
 
   snippetEl.textContent =
@@ -175,7 +196,9 @@ async function preview() {
 roi_y: ${roi.y.toFixed(3)}
 roi_width: ${roi.width.toFixed(3)}
 roi_height: ${roi.height.toFixed(3)}
-red_pixel_threshold_percent: ${fieldEl('threshold_percent').value}`;
+red_pixel_threshold_percent: ${fieldEl('threshold_percent').value}
+min_aspect_ratio: ${fieldEl('min_aspect_ratio').value}
+max_aspect_ratio: ${fieldEl('max_aspect_ratio').value}`;
 
   const res = await fetch('/calibrate/preview', {
     method: 'POST',
@@ -183,13 +206,17 @@ red_pixel_threshold_percent: ${fieldEl('threshold_percent').value}`;
     body: JSON.stringify(body),
   });
   const data = await res.json();
+  const detailEl = document.getElementById('result-detail');
   if (data.error) {
     resultEl.textContent = data.error;
     resultEl.className = '';
+    detailEl.textContent = '';
     return;
   }
-  resultEl.textContent = `Red pixels: ${data.red_pct}% - ${data.detected ? 'Bin detected' : 'No bin'}`;
+  resultEl.textContent = `Largest blob: ${data.red_pct}% - ${data.detected ? 'Bin detected' : 'No bin'}`;
   resultEl.className = data.detected ? 'detected' : 'clear';
+  const aspectText = data.aspect_ratio === null ? 'n/a' : data.aspect_ratio;
+  detailEl.textContent = `Total red in box: ${data.total_red_pct}% - blob aspect ratio: ${aspectText}`;
 }
 
 fields.forEach((name) => fieldEl(name).addEventListener('change', () => { if (roi) preview(); }));

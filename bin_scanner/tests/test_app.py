@@ -15,6 +15,7 @@ def app_module(tmp_path, monkeypatch):
         "red_hue_min": 0, "red_hue_max": 12, "red_hue_min2": 245, "red_hue_max2": 255,
         "min_saturation": 90, "min_value": 60,
         "red_pixel_threshold_percent": 10.0,
+        "min_aspect_ratio": 0.3, "max_aspect_ratio": 4.0,
         "notify_title": "Bin check", "notify_message": "The bin is still out front.",
         "log_level": "info",
     }
@@ -69,12 +70,15 @@ def test_calibrate_snapshot_and_preview(client, app_module, monkeypatch):
             "red_hue_min": 0, "red_hue_max": 12, "red_hue_min2": 245, "red_hue_max2": 255,
             "min_saturation": 90, "min_value": 60,
             "red_pixel_threshold_percent": 10.0,
+            "min_aspect_ratio": 0.3, "max_aspect_ratio": 4.0,
         },
     )
     assert preview_res.status_code == 200
     data = preview_res.get_json()
     assert data["detected"] is True
     assert data["red_pct"] > 10.0
+    assert data["total_red_pct"] >= data["red_pct"]
+    assert data["aspect_ratio"] is not None
 
 
 def test_calibrate_preview_without_snapshot_yet(client):

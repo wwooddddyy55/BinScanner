@@ -19,7 +19,7 @@ from pathlib import Path
 # Reuse the same detection logic the add-on runs, without needing Flask/requests.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin_scanner" / "app"))
 
-from detector import HsvThresholds, Roi, crop_roi, red_pixel_percent  # noqa: E402
+from detector import HsvThresholds, Roi, analyze_red_blob, crop_roi  # noqa: E402
 from PIL import Image  # noqa: E402
 
 
@@ -37,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-saturation", type=int, default=90)
     parser.add_argument("--min-value", type=int, default=60)
     parser.add_argument("--threshold-percent", type=float, default=10.0)
+    parser.add_argument(
+        "--min-aspect-ratio", type=float, default=0.3, help="Minimum blob bounding-box height/width ratio"
+    )
+    parser.add_argument(
+        "--max-aspect-ratio", type=float, default=4.0, help="Maximum blob bounding-box height/width ratio"
+    )
     parser.add_argument(
         "--save-roi", metavar="PATH", help="Save a crop of just the ROI, to visually confirm placement"
     )
@@ -59,18 +65,25 @@ def main() -> int:
     image = Image.open(args.image)
     image.load()
 
-    pct = red_pixel_percent(image, roi, thresholds)
-    detected = pct >= args.threshold_percent
+    analysis = analyze_red_blob(image, roi, thresholds)
+    shape_ok = (
+        analysis.aspect_ratio is not None
+        and args.min_aspect_ratio <= analysis.aspect_ratio <= args.max_aspect_ratio
+    )
+    detected = analysis.blob_pct >= args.threshold_percent and shape_ok
 
-    print(f"Image size:        {image.size[0]}x{image.size[1]}")
-    print(f"ROI:                x={roi.x} y={roi.y} width={roi.width} height={roi.height}")
-    print(f"Red pixels in ROI:  {pct:.2f}%")
-    print(f"Threshold:          {args.threshold_percent}%")
-    print(f"Bin detected:       {detected}")
+    print(f"Image size:          {image.size[0]}x{image.size[1]}")
+    print(f"ROI:                  x={roi.x} y={roi.y} width={roi.width} height={roi.height}")
+    print(f"Total red in ROI:     {analysis.total_red_pct:.2f}%")
+    print(f"Largest blob:         {analysis.blob_pct:.2f}% ({analysis.blob_pixel_count} px)")
+    print(f"Blob aspect ratio:    {analysis.aspect_ratio}")
+    print(f"Threshold:            {args.threshold_percent}%")
+    print(f"Aspect ratio bounds:  {args.min_aspect_ratio} - {args.max_aspect_ratio}")
+    print(f"Bin detected:         {detected}")
 
     if args.save_roi:
         crop_roi(image.convert("RGB"), roi).save(args.save_roi)
-        print(f"Saved ROI preview:  {args.save_roi}")
+        print(f"Saved ROI preview:    {args.save_roi}")
 
     return 0
 

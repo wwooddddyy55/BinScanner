@@ -79,6 +79,8 @@ def calibrate_options():
         min_saturation=OPTIONS["min_saturation"],
         min_value=OPTIONS["min_value"],
         red_pixel_threshold_percent=OPTIONS["red_pixel_threshold_percent"],
+        min_aspect_ratio=OPTIONS["min_aspect_ratio"],
+        max_aspect_ratio=OPTIONS["max_aspect_ratio"],
     )
 
 
@@ -115,15 +117,24 @@ def calibrate_preview():
             min_value=int(body["min_value"]),
         )
         threshold_percent = float(body["red_pixel_threshold_percent"])
+        min_aspect_ratio = float(body.get("min_aspect_ratio", 0.0))
+        max_aspect_ratio = float(body.get("max_aspect_ratio", float("inf")))
     except (KeyError, ValueError, TypeError) as exc:
         return jsonify(error=f"Invalid parameters: {exc}"), 400
 
     try:
-        detected, red_pct = detect_red_bin(_last_calibration_snapshot, roi, thresholds, threshold_percent)
+        result = detect_red_bin(
+            _last_calibration_snapshot, roi, thresholds, threshold_percent, min_aspect_ratio, max_aspect_ratio
+        )
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
-    return jsonify(detected=detected, red_pct=round(red_pct, 2))
+    return jsonify(
+        detected=result.detected,
+        red_pct=round(result.red_pct, 2),
+        total_red_pct=round(result.total_red_pct, 2),
+        aspect_ratio=round(result.aspect_ratio, 2) if result.aspect_ratio is not None else None,
+    )
 
 
 @app.post("/scan")
@@ -132,8 +143,13 @@ def scan():
 
     try:
         image_bytes = fetch_camera_snapshot(OPTIONS["camera_entity"])
-        detected, red_pct = detect_red_bin(
-            image_bytes, ROI, THRESHOLDS, OPTIONS["red_pixel_threshold_percent"]
+        result = detect_red_bin(
+            image_bytes,
+            ROI,
+            THRESHOLDS,
+            OPTIONS["red_pixel_threshold_percent"],
+            OPTIONS["min_aspect_ratio"],
+            OPTIONS["max_aspect_ratio"],
         )
     except HomeAssistantError as exc:
         logger.error("Scan failed: %s", exc)
@@ -142,10 +158,17 @@ def scan():
         logger.exception("Unexpected error during scan")
         return jsonify(error=str(exc)), 500
 
-    logger.info("Scan result: detected=%s red_pct=%.2f%% dry_run=%s", detected, red_pct, dry_run)
+    logger.info(
+        "Scan result: detected=%s blob_pct=%.2f%% total_red_pct=%.2f%% aspect_ratio=%s dry_run=%s",
+        result.detected,
+        result.red_pct,
+        result.total_red_pct,
+        result.aspect_ratio,
+        dry_run,
+    )
 
     notified = False
-    if detected and not dry_run:
+    if result.detected and not dry_run:
         try:
             call_notify_service(
                 OPTIONS["notify_service"], OPTIONS["notify_title"], OPTIONS["notify_message"]
@@ -154,11 +177,16 @@ def scan():
         except HomeAssistantError as exc:
             logger.error("Notify failed: %s", exc)
             return (
-                jsonify(detected=detected, red_pct=round(red_pct, 2), notified=False, error=str(exc)),
+                jsonify(detected=result.detected, red_pct=round(result.red_pct, 2), notified=False, error=str(exc)),
                 502,
             )
 
-    return jsonify(detected=detected, red_pct=round(red_pct, 2), notified=notified, dry_run=dry_run)
+    return jsonify(
+        detected=result.detected,
+        red_pct=round(result.red_pct, 2),
+        notified=notified,
+        dry_run=dry_run,
+    )
 
 
 if __name__ == "__main__":

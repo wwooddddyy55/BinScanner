@@ -1,14 +1,15 @@
 """Red-bin detection logic.
 
-Deliberately dependency-light (Pillow only, no numpy/OpenCV) and independent
-of Flask/Home Assistant so it can be unit tested and reused by the standalone
-calibration tool.
+Deliberately dependency-light (Pillow + stdlib only, no numpy/OpenCV/scipy)
+and independent of Flask/Home Assistant so it can be unit tested and reused
+by the standalone calibration tool.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 from PIL import Image
 
@@ -39,6 +40,25 @@ class HsvThresholds:
     min_value: int
 
 
+@dataclass(frozen=True)
+class BlobAnalysis:
+    """Result of scanning a region for red pixels and its largest connected blob."""
+
+    total_red_pct: float  # % of the region that is any red pixel (scattered + blob)
+    blob_pct: float  # % of the region covered by the single largest connected red blob
+    blob_pixel_count: int
+    aspect_ratio: Optional[float]  # height/width of the largest blob's bounding box, None if no red found
+
+
+@dataclass(frozen=True)
+class DetectionResult:
+    detected: bool
+    red_pct: float  # the largest blob's % of the region - what threshold_percent is compared against
+    total_red_pct: float
+    aspect_ratio: Optional[float]
+    blob_pixel_count: int
+
+
 def _is_red(h: int, s: int, v: int, t: HsvThresholds) -> bool:
     if s < t.min_saturation or v < t.min_value:
         return False
@@ -56,14 +76,82 @@ def crop_roi(image: Image.Image, roi: Roi) -> Image.Image:
     return image.crop((left, top, right, bottom))
 
 
-def red_pixel_percent(image: Image.Image, roi: Roi, thresholds: HsvThresholds) -> float:
+def _red_mask(cropped: Image.Image, thresholds: HsvThresholds) -> Tuple[List[List[bool]], int, int]:
+    hsv = cropped.convert("HSV")
+    width, height = hsv.size
+    pixels = hsv.load()
+    mask = [[_is_red(*pixels[x, y], thresholds) for x in range(width)] for y in range(height)]
+    return mask, width, height
+
+
+def _largest_blob(mask: List[List[bool]], width: int, height: int) -> Optional[Tuple[int, int, int, int, int]]:
+    """Finds the largest 4-connected blob of True cells.
+
+    Returns (pixel_count, min_x, min_y, max_x, max_y), or None if the mask is empty.
+    """
+    visited = [[False] * width for _ in range(height)]
+    best: Optional[Tuple[int, int, int, int, int]] = None
+
+    for start_y in range(height):
+        for start_x in range(width):
+            if not mask[start_y][start_x] or visited[start_y][start_x]:
+                continue
+
+            visited[start_y][start_x] = True
+            queue = deque([(start_x, start_y)])
+            pixel_count = 0
+            min_x = max_x = start_x
+            min_y = max_y = start_y
+
+            while queue:
+                x, y = queue.popleft()
+                pixel_count += 1
+                min_x, max_x = min(min_x, x), max(max_x, x)
+                min_y, max_y = min(min_y, y), max(max_y, y)
+                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                    if 0 <= nx < width and 0 <= ny < height and mask[ny][nx] and not visited[ny][nx]:
+                        visited[ny][nx] = True
+                        queue.append((nx, ny))
+
+            if best is None or pixel_count > best[0]:
+                best = (pixel_count, min_x, min_y, max_x, max_y)
+
+    return best
+
+
+def analyze_red_blob(image: Image.Image, roi: Roi, thresholds: HsvThresholds) -> BlobAnalysis:
     cropped = crop_roi(image.convert("RGB"), roi)
-    hsv_pixels = cropped.convert("HSV").getdata()
-    total = cropped.width * cropped.height
+    mask, width, height = _red_mask(cropped, thresholds)
+    total = width * height
     if total == 0:
-        return 0.0
-    red_count = sum(1 for h, s, v in hsv_pixels if _is_red(h, s, v, thresholds))
-    return 100.0 * red_count / total
+        return BlobAnalysis(total_red_pct=0.0, blob_pct=0.0, blob_pixel_count=0, aspect_ratio=None)
+
+    total_red_pixels = sum(row.count(True) for row in mask)
+    total_red_pct = 100.0 * total_red_pixels / total
+
+    blob = _largest_blob(mask, width, height)
+    if blob is None:
+        return BlobAnalysis(total_red_pct=total_red_pct, blob_pct=0.0, blob_pixel_count=0, aspect_ratio=None)
+
+    pixel_count, min_x, min_y, max_x, max_y = blob
+    bbox_width = max_x - min_x + 1
+    bbox_height = max_y - min_y + 1
+
+    return BlobAnalysis(
+        total_red_pct=total_red_pct,
+        blob_pct=100.0 * pixel_count / total,
+        blob_pixel_count=pixel_count,
+        aspect_ratio=bbox_height / bbox_width,
+    )
+
+
+def red_pixel_percent(image: Image.Image, roi: Roi, thresholds: HsvThresholds) -> float:
+    """Total % of the ROI that is a red pixel, ignoring shape.
+
+    Kept for the offline calibration tool; detect_red_bin uses the more
+    reliable largest-blob percentage instead (see analyze_red_blob).
+    """
+    return analyze_red_blob(image, roi, thresholds).total_red_pct
 
 
 def detect_red_bin(
@@ -71,9 +159,32 @@ def detect_red_bin(
     roi: Roi,
     thresholds: HsvThresholds,
     threshold_percent: float,
-) -> Tuple[bool, float]:
-    """Returns (detected, red_pixel_percent)."""
+    min_aspect_ratio: float = 0.0,
+    max_aspect_ratio: float = float("inf"),
+) -> DetectionResult:
+    """Detects the bin from the largest connected red blob in the ROI, not a raw pixel count.
+
+    Comparing against the single largest connected blob (rather than total red
+    pixels scattered anywhere in the ROI) rejects noise that a plain color
+    count would miscount as the bin: a wet-pavement reflection, a sliver of a
+    red car passing in the background, a few red leaves. The aspect-ratio
+    bounds add a second filter against a blob shaped nothing like the bin
+    (e.g. a thin streak of glare).
+    """
     image = Image.open(BytesIO(image_bytes))
     image.load()
-    pct = red_pixel_percent(image, roi, thresholds)
-    return pct >= threshold_percent, pct
+    analysis = analyze_red_blob(image, roi, thresholds)
+
+    shape_ok = (
+        analysis.aspect_ratio is not None
+        and min_aspect_ratio <= analysis.aspect_ratio <= max_aspect_ratio
+    )
+    detected = analysis.blob_pct >= threshold_percent and shape_ok
+
+    return DetectionResult(
+        detected=detected,
+        red_pct=analysis.blob_pct,
+        total_red_pct=analysis.total_red_pct,
+        aspect_ratio=analysis.aspect_ratio,
+        blob_pixel_count=analysis.blob_pixel_count,
+    )
