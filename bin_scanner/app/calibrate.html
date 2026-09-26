@@ -2,44 +2,62 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Bin Scanner - Calibrate</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; background: #111; color: #eee; }
-  h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
-  p.hint { color: #aaa; margin-top: 0; max-width: 60rem; }
-  #canvas-wrap { display: inline-block; border: 1px solid #333; margin: 1rem 0; line-height: 0; }
-  canvas { display: block; max-width: 100%; height: auto; cursor: crosshair; }
-  .row { display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: flex-start; }
-  fieldset { border: 1px solid #333; border-radius: 6px; padding: 0.75rem 1rem; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background: #111; color: #eee; }
+  h1 { font-size: 1.15rem; margin-bottom: 0.25rem; }
+  p.hint { color: #aaa; margin-top: 0; max-width: 60rem; font-size: 0.9rem; }
+  #canvas-wrap { border: 1px solid #333; margin: 1rem 0; line-height: 0; max-width: 100%; }
+  canvas { display: block; max-width: 100%; width: 100%; height: auto; cursor: crosshair; touch-action: none; }
+  .row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: flex-start; }
+  fieldset { border: 1px solid #333; border-radius: 6px; padding: 0.75rem 1rem; flex: 1 1 260px; min-width: 0; max-width: 100%; }
   legend { padding: 0 0.4rem; color: #ccc; }
   label { display: block; font-size: 0.85rem; margin-top: 0.5rem; color: #ccc; }
-  input[type=number] { width: 5.5rem; }
-  button { background: #2d6cdf; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; margin-right: 0.5rem; font-size: 0.9rem; }
+  input[type=number] {
+    width: 100%; max-width: 8rem; font-size: 1rem; padding: 0.4rem; margin-top: 0.2rem;
+    background: #1b1b1b; color: #eee; border: 1px solid #444; border-radius: 4px;
+  }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+  button {
+    background: #2d6cdf; color: white; border: none; padding: 0.65rem 1.1rem; border-radius: 4px;
+    cursor: pointer; font-size: 0.95rem; min-height: 2.6rem; touch-action: manipulation;
+  }
   button.secondary { background: #333; }
   #result { font-size: 1.1rem; margin-top: 0.25rem; }
   #result.detected { color: #ff6b6b; }
   #result.clear { color: #6bffa0; }
-  pre { background: #1b1b1b; border: 1px solid #333; padding: 0.75rem 1rem; border-radius: 6px; width: fit-content; }
-  #status { color: #f0ad4e; margin-left: 0.75rem; }
-  #mode-badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.8rem; margin-left: 0.75rem; }
+  pre { background: #1b1b1b; border: 1px solid #333; padding: 0.75rem 1rem; border-radius: 6px; max-width: 100%; overflow-x: auto; }
+  #status { color: #f0ad4e; }
+  #mode-badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.8rem; }
   #mode-badge.color { background: #2d6cdf33; color: #7fb0ff; }
   #mode-badge.infrared { background: #6b46c133; color: #b794f4; }
   #ir-reference-status { margin: 0.5rem 0; color: #ccc; font-size: 0.9rem; }
+
+  @media (max-width: 480px) {
+    body { padding: 0.75rem; }
+    .row { gap: 0.75rem; }
+    fieldset { flex-basis: 100%; padding: 0.6rem 0.75rem; }
+    button { width: 100%; }
+  }
 </style>
 </head>
 <body>
   <h1>Bin Scanner &mdash; calibrate detection area</h1>
   <p class="hint">
-    Click "Refresh snapshot", then click-and-drag on the image to draw a box around where the bin sits.
+    Tap "Refresh snapshot", then click/tap-and-drag on the image to draw a box around where the bin sits.
     The result below is computed by the add-on's real detection code against this exact snapshot, so what
     you see here is what a real scan would decide. Adjust the sliders until it matches reality, then copy
     the values at the bottom into the add-on's <strong>Configuration</strong> tab in Home Assistant and
     restart the add-on &mdash; this page does not save anything itself.
   </p>
 
-  <button id="refresh">Refresh snapshot</button>
-  <span id="status"></span>
-  <span id="mode-badge"></span>
+  <div class="toolbar">
+    <button id="refresh">Refresh snapshot</button>
+    <span id="status"></span>
+    <span id="mode-badge"></span>
+  </div>
 
   <div id="canvas-wrap">
     <canvas id="canvas" width="800" height="600"></canvas>
@@ -93,8 +111,10 @@
         you're above the max, so re-capturing occasionally also keeps the baseline current as the
         driveway's appearance drifts (dirt, leaves, seasons).
       </p>
-      <button id="capture-ir-reference" class="secondary">Capture current snapshot as a night reference sample</button>
-      <button id="clear-ir-reference" class="secondary">Clear all night reference samples</button>
+      <div class="toolbar">
+        <button id="capture-ir-reference" class="secondary">Capture current snapshot as a night reference sample</button>
+        <button id="clear-ir-reference" class="secondary">Clear all night reference samples</button>
+      </div>
     </fieldset>
 
     <fieldset>
@@ -223,31 +243,52 @@ function canvasPoint(evt) {
   };
 }
 
-canvas.addEventListener('mousedown', (evt) => {
+function dragBegin(point) {
   if (!imgLoaded) return;
   dragging = true;
-  dragStart = canvasPoint(evt);
-});
+  dragStart = point;
+}
 
-canvas.addEventListener('mousemove', (evt) => {
+function dragUpdate(point) {
   if (!dragging) return;
-  const p = canvasPoint(evt);
-  const x0 = Math.max(0, Math.min(dragStart.x, p.x));
-  const x1 = Math.min(canvas.width, Math.max(dragStart.x, p.x));
-  const y0 = Math.max(0, Math.min(dragStart.y, p.y));
-  const y1 = Math.min(canvas.height, Math.max(dragStart.y, p.y));
+  const x0 = Math.max(0, Math.min(dragStart.x, point.x));
+  const x1 = Math.min(canvas.width, Math.max(dragStart.x, point.x));
+  const y0 = Math.max(0, Math.min(dragStart.y, point.y));
+  const y1 = Math.min(canvas.height, Math.max(dragStart.y, point.y));
   roi = {
     x: x0 / canvas.width, y: y0 / canvas.height,
     width: (x1 - x0) / canvas.width, height: (y1 - y0) / canvas.height,
   };
   draw();
-});
+}
 
-window.addEventListener('mouseup', () => {
+function dragEnd() {
   if (!dragging) return;
   dragging = false;
   if (roi && roi.width > 0.01 && roi.height > 0.01) preview();
+}
+
+canvas.addEventListener('mousedown', (evt) => dragBegin(canvasPoint(evt)));
+canvas.addEventListener('mousemove', (evt) => dragUpdate(canvasPoint(evt)));
+window.addEventListener('mouseup', dragEnd);
+
+canvas.addEventListener('touchstart', (evt) => {
+  if (evt.touches.length !== 1) return;
+  evt.preventDefault();
+  dragBegin(canvasPoint(evt.touches[0]));
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (evt) => {
+  if (!dragging || evt.touches.length !== 1) return;
+  evt.preventDefault();
+  dragUpdate(canvasPoint(evt.touches[0]));
+}, { passive: false });
+
+canvas.addEventListener('touchend', (evt) => {
+  evt.preventDefault();
+  dragEnd();
 });
+canvas.addEventListener('touchcancel', dragEnd);
 
 async function preview() {
   if (!roi) return;

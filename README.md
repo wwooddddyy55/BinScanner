@@ -117,11 +117,16 @@ long-lived access token to create or manage.
 
 ### Option A: draw it in the browser (recommended)
 
-With the add-on running, open:
+With the add-on running, click **OPEN WEB UI** on the add-on's page in
+**Settings → Add-ons → Bin Scanner** (next to the Configuration tab), or open
+directly:
 
 ```
 http://<addon-hostname>:8099/calibrate
 ```
+
+The page is mobile-friendly, so this also works from your phone — handy for
+capturing a night reference sample outside next to the bin.
 
 (use whatever host port you've mapped `8099/tcp` to, if you changed it in
 the add-on's Network settings). This page:
