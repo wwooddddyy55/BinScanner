@@ -2,7 +2,14 @@ from io import BytesIO
 
 from PIL import Image, ImageDraw
 
-from detector import HsvThresholds, Roi, detect_red_bin, red_pixel_percent
+from detector import (
+    HsvThresholds,
+    Roi,
+    detect_bin_by_change,
+    detect_red_bin,
+    is_infrared_mode,
+    red_pixel_percent,
+)
 
 DEFAULT_THRESHOLDS = HsvThresholds(
     hue_min=0, hue_max=12, hue_min2=245, hue_max2=255, min_saturation=90, min_value=60
@@ -106,3 +113,72 @@ def test_roi_restricts_detection_to_configured_region():
     pct = red_pixel_percent(Image.open(BytesIO(image_bytes)), bottom_right_roi, DEFAULT_THRESHOLDS)
 
     assert pct == 0.0
+
+
+# --- Infrared (night) mode --------------------------------------------------
+
+
+def make_grayscale_bytes(size=(100, 100), bg=128, patch=None, patch_value=220) -> bytes:
+    image = Image.new("L", size, bg).convert("RGB")
+    if patch is not None:
+        image_draw = ImageDraw.Draw(image)
+        image_draw.rectangle(patch, fill=(patch_value, patch_value, patch_value))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_is_infrared_mode_distinguishes_monochrome_from_color():
+    gray_image = Image.open(BytesIO(make_grayscale_bytes()))
+    color_image = Image.open(BytesIO(make_image_bytes(red_box=(0, 0, 44, 44))))
+
+    assert is_infrared_mode(gray_image) is True
+    assert is_infrared_mode(color_image) is False
+
+
+def test_detect_bin_by_change_flags_new_object_against_reference():
+    reference_bytes = make_grayscale_bytes()  # empty driveway at night
+    current_bytes = make_grayscale_bytes(patch=(20, 20, 60, 60))  # bin now present
+
+    result = detect_bin_by_change(current_bytes, reference_bytes, FULL_FRAME_ROI, threshold_percent=10.0)
+
+    assert result.mode == "infrared"
+    assert result.detected is True
+    assert result.aspect_ratio == 1.0
+
+
+def test_detect_bin_by_change_ignores_identical_snapshot():
+    reference_bytes = make_grayscale_bytes()
+    current_bytes = make_grayscale_bytes()  # nothing changed
+
+    result = detect_bin_by_change(current_bytes, reference_bytes, FULL_FRAME_ROI, threshold_percent=10.0)
+
+    assert result.detected is False
+    assert result.red_pct == 0.0
+
+
+def test_detect_bin_by_change_tolerates_uniform_brightness_shift():
+    # Global exposure/IR illuminator brightness can vary night to night with
+    # nothing actually different in frame - z-score normalization should
+    # absorb a uniform shift rather than flagging the whole frame as changed.
+    reference_bytes = make_grayscale_bytes(bg=128)
+    brighter_bytes = make_grayscale_bytes(bg=160)
+
+    result = detect_bin_by_change(brighter_bytes, reference_bytes, FULL_FRAME_ROI, threshold_percent=10.0)
+
+    assert result.detected is False
+
+
+def test_detect_bin_by_change_respects_aspect_ratio_filter():
+    reference_bytes = make_grayscale_bytes()
+    # A thin horizontal streak of change (e.g. glare) rather than a bin-shaped blob.
+    current_bytes = make_grayscale_bytes(patch=(0, 0, 79, 4))
+
+    unfiltered = detect_bin_by_change(current_bytes, reference_bytes, FULL_FRAME_ROI, threshold_percent=2.0)
+    filtered = detect_bin_by_change(
+        current_bytes, reference_bytes, FULL_FRAME_ROI, threshold_percent=2.0,
+        min_aspect_ratio=0.3, max_aspect_ratio=4.0,
+    )
+
+    assert unfiltered.detected is True
+    assert filtered.detected is False
