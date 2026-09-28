@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0
+
+- Reframed the default notification copy from a "bring it back in" reminder
+  to a "you forgot to put it out" reminder: `notify_message` and the add-on
+  `description` now describe the bin as still sitting in its storage spot
+  rather than "still out front." Detection itself is unchanged — it always
+  fired on the bin being *present* in the ROI, and the ROI has pointed at
+  the bin's storage spot (not the curb) since the 0.3.0 camera switch, so
+  this is a copy-only fix to match the wording to what the ROI actually
+  watches. If you'd rather keep the original "bring it back in" reminder,
+  point the camera/ROI at the curb instead and set `notify_message` back to
+  something like "The bin is still out front — don't forget to bring it
+  in."
+
 ## 0.5.1
 
 - `/calibrate` is now mobile-friendly: added a viewport meta tag, touch
