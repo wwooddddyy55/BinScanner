@@ -1,10 +1,10 @@
 # BinScanner
 
 A tiny Home Assistant add-on that checks a camera snapshot for a red-lidded
-bin still sitting out front, and sends a push notification if it's still
-there. Works in both daylight (color) and infrared/night mode, since it's
-designed to be checked repeatedly through bin-night evening as it gets
-later.
+bin still sitting in its storage spot, and sends a push notification if you
+haven't taken it out yet. Works in both daylight (color) and infrared/night
+mode, since it's designed to be checked repeatedly through the evening
+before collection as it gets later.
 
 It's built for a low resource footprint: no ML model, no OpenCV/numpy — just
 a Pillow color-threshold check over a small, configurable region of the
@@ -14,7 +14,7 @@ that's constantly polling.
 ## How it works
 
 ```
-HA automation (your own schedule, e.g. several checks through bin-night evening)
+HA automation (your own schedule, e.g. several checks through the evening before collection)
   → rest_command → POST http://<addon-hostname>:8099/scan
       bin_scanner add-on:
         1. Fetches a snapshot from your existing camera entity via HA's API
@@ -40,13 +40,14 @@ change. See `min_aspect_ratio`/`max_aspect_ratio` below.
 
 ### Infrared/night mode
 
-Since this is meant to nag you through the evening (many checks land after
-dark, when the camera switches to IR illuminators and shoots monochrome),
-night detection isn't an edge case here — it's the mode most scans will
-actually run in. There's no color signal at all in a monochrome IR image,
-so instead of a color threshold, night detection compares the region against
-a **baseline built from several reference snapshots you capture**, with the
-bin confirmed absent, ideally on a few different nights. Rather than diffing
+Since this is meant to nag you through the evening before collection (many
+checks land after dark, when the camera switches to IR illuminators and
+shoots monochrome), night detection isn't an edge case here — it's the mode
+most scans will actually run in. There's no color signal at all in a
+monochrome IR image, so instead of a color threshold, night detection
+compares the region against a **baseline built from several reference
+snapshots you capture**, with the bin confirmed absent, ideally on a few
+different nights. Rather than diffing
 against one fixed image, this learns each pixel's own mean and spread across
 those samples — a spot that's normally noisy night to night (streetlight
 cycling, moonlight, IR-illuminator gain drift) earns a proportionally wider

@@ -1,7 +1,7 @@
 name: Bin Scanner
-version: "0.5.1"
+version: "0.6.0"
 slug: bin_scanner
-description: Checks a Home Assistant camera snapshot for a red-lidded bin left out front, and sends a notification if it's still there.
+description: Checks a Home Assistant camera snapshot for a red-lidded bin still sitting in its storage spot, and sends a notification if you haven't taken it out yet.
 url: https://github.com/wwooddddyy55/binscanner
 arch:
   - aarch64
@@ -42,7 +42,7 @@ options:
   confirm_consecutive_scans: 1
   confirm_max_gap_minutes: 180.0
   notify_title: "Bin check"
-  notify_message: "The bin is still out front — don't forget to bring it in."
+  notify_message: "The bin is still in its spot — don't forget to take it out."
   log_level: info
 schema:
   camera_entity: str
